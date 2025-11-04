@@ -1,130 +1,82 @@
-import uuid
 from datetime import datetime
 
-from flask import Flask, request, jsonify
+from flask import Flask
+from flask import request, jsonify
 from flask_cors import CORS
 from sqlalchemy.dialects.postgresql import insert
 
 from db.connection import engine, SessionLocal
 from db.models import Base, SkuDemandForecast, SalesAnomalyEvent, ReorderSuggestion, SupplierPerformanceScore, \
-    DynamicPricingRecommendation, CustomerSegment, SalesPerformanceScore, ProfitabilityForecast, InventoryOptimization, \
+    CustomerSegment, DynamicPricingRecommendation, SalesPerformanceScore, ProfitabilityForecast, InventoryOptimization, \
     CashflowForecast
 from models.anomaly_model import detect_sales_anomalies
-from models.cashflow_model import compute_cashflow
-from models.customer_model import calculate_customer_segments
+from models.cashflow_forecast_model import compute_cashflow_forecast
+from models.customer_segmentation_model import calculate_customer_segments
+from models.dynamic_pricing_model import recommend_prices
 from models.forecast_model import train_and_predict
-from models.inventory_model import optimize_inventory
-from models.pricing_model import generate_pricing_recommendations
-from models.profitability_model import calculate_profitability
-from models.sales_performance_model import calculate_sales_performance
-from models.supplier_model import calculate_supplier_performance
+from models.inventory_optimization_model import optimize_inventory
+from models.profitability_model import compute_monthly_profitability
+from models.reorder_model import generate_reorder_suggestions
+from models.sales_performance_model import score_salespersons
+from models.supplier_performance_model import score_suppliers
+from utils.ai_config import DEFAULT_FORECAST_DAYS
 
 app = Flask(__name__)
 CORS(app)
 
+# Ensure tables exist
 Base.metadata.create_all(bind=engine)
 
 
-# 🔹 Automatically clean up sessions after each request
-@app.teardown_appcontext
-def shutdown_session(exception=None):
-    SessionLocal.remove()
+@app.route("/api/v1/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"})
 
 
 @app.route("/api/v1/forecast", methods=["POST"])
 def forecast():
-    data = request.get_json()
-    company_id = data.get("company_id")
-    warehouse_id = data.get("warehouse_id")
-    product_id = data.get("product_id")
-    days = data.get("days", 30)
-
-    if not company_id or not warehouse_id:
-        return jsonify({"status": "error", "message": "company_id and warehouse_id are required"}), 400
-
-    predictions = train_and_predict(company_id, warehouse_id, days)
-
-    db = SessionLocal()
-    try:
-        rows = []
-        for p in predictions:
-            rows.append({
-                "id": str(uuid.uuid4()),
-                "product_id": product_id or 0,
-                "warehouse_id": warehouse_id,
-                "forecast_date": p["forecast_date"],
-                "predicted_quantity": p["predicted_quantity"],
-                "model_version": "v1.0",
-                "company_id": company_id,
-                "generated_at": datetime.utcnow(),
-            })
-
-        if rows:
-            stmt = insert(SkuDemandForecast).values(rows)
-            stmt = stmt.on_conflict_do_update(
-                index_elements=[
-                    SkuDemandForecast.company_id,
-                    SkuDemandForecast.product_id,
-                    SkuDemandForecast.warehouse_id,
-                    SkuDemandForecast.forecast_date,
-                    SkuDemandForecast.model_version
-                ],
-                set_={
-                    "predicted_quantity": stmt.excluded.predicted_quantity,
-                    "generated_at": datetime.utcnow()
-                }
-            )
-            db.execute(stmt)
-            db.commit()
-
-        return jsonify({"status": "success", "count": len(rows)})
-    finally:
-        db.close()
-
-
-@app.route("/api/v1/forecast/<int:company_id>", methods=["GET"])
-def get_forecasts(company_id):
-    db = SessionLocal()
-    try:
-        results = db.query(SkuDemandForecast).filter_by(company_id=company_id).order_by(
-            SkuDemandForecast.forecast_date).all()
-        return jsonify([{
-            "product_id": f.product_id,
-            "warehouse_id": f.warehouse_id,
-            "forecast_date": f.forecast_date.strftime("%Y-%m-%d"),
-            "predicted_quantity": float(f.predicted_quantity),
-        } for f in results])
-    finally:
-        db.close()
-
-
-@app.route("/api/v1/anomalies", methods=["POST"])
-def detect_anomalies():
+    """
+    Body:
+    {
+      "company_id": 1,
+      "warehouse_id": 5,
+      "days": 30,             # optional (default 30)
+      "product_id": 12345     # optional; if missing, forecasts all SKUs in the warehouse
+    }
+    """
     data = request.get_json() or {}
     company_id = data.get("company_id")
     warehouse_id = data.get("warehouse_id")
+    days = int(data.get("days", 30))
+    product_id = data.get("product_id")
 
     if not company_id or not warehouse_id:
         return jsonify({"status": "error", "message": "company_id and warehouse_id are required"}), 400
 
-    anomalies = detect_sales_anomalies(company_id, warehouse_id)
-    if not anomalies:
-        return jsonify({"status": "ok", "count": 0, "message": "No anomalies found."})
+    predictions = train_and_predict(company_id, warehouse_id, days, product_id)
+
+    if not predictions:
+        return jsonify({"status": "ok", "count": 0, "message": "No trainable SKUs found (insufficient history)."}), 200
 
     db = SessionLocal()
     try:
-        stmt = insert(SalesAnomalyEvent).values(anomalies)
+        stmt = insert(SkuDemandForecast).values(predictions)
         stmt = stmt.on_conflict_do_update(
-            index_elements=[SalesAnomalyEvent.sale_id, SalesAnomalyEvent.policy_code],
+            index_elements=[
+                SkuDemandForecast.company_id,
+                SkuDemandForecast.product_id,
+                SkuDemandForecast.warehouse_id,
+                SkuDemandForecast.forecast_date,
+                SkuDemandForecast.model_version
+            ],
             set_={
-                "score": stmt.excluded.score,
-                "level": stmt.excluded.level,
-                "warehouse_id": stmt.excluded.warehouse_id
+                "predicted_quantity": stmt.excluded.predicted_quantity,
+                "generated_at": datetime.utcnow()
             }
         )
         db.execute(stmt)
         db.commit()
-        return jsonify({"status": "success", "count": len(anomalies)})
+        return jsonify({"status": "success", "count": len(predictions)})
     except Exception as e:
         db.rollback()
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -132,26 +84,72 @@ def detect_anomalies():
         db.close()
 
 
-@app.route("/api/v1/anomalies/<int:company_id>/<int:warehouse_id>", methods=["GET"])
-def get_anomalies(company_id, warehouse_id):
+@app.route("/api/v1/anomaly/sales", methods=["POST"])
+def detect_anomaly_sales():
+    """
+    Body:
+    {
+      "company_id": 1,
+      "warehouse_id": 5
+    }
+    """
+
+    data = request.get_json() or {}
+    company_id = data.get("company_id")
+    warehouse_id = data.get("warehouse_id")
+
+    if not company_id or not warehouse_id:
+        return jsonify({"status": "error",
+                        "message": "company_id & warehouse_id required"}), 400
+
+    results = detect_sales_anomalies(company_id, warehouse_id)
+
+    if not results:
+        return jsonify({"status": "ok", "count": 0, "message": "No anomalies found"}), 200
+
     db = SessionLocal()
     try:
-        results = (
+        stmt = insert(SalesAnomalyEvent).values(results)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[
+                SalesAnomalyEvent.sale_id,
+                SalesAnomalyEvent.policy_code
+            ],
+            set_={
+                "score": stmt.excluded.score,
+                "level": stmt.excluded.level,
+                "created_at": datetime.utcnow(),
+            }
+        )
+        db.execute(stmt)
+        db.commit()
+        return jsonify({"status": "success", "count": len(results)})
+    except Exception as e:
+        db.rollback()
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/anomaly/sales/<int:company_id>/<int:warehouse_id>",
+           methods=["GET"])
+def get_anomaly_sales(company_id, warehouse_id):
+    db = SessionLocal()
+    try:
+        rows = (
             db.query(SalesAnomalyEvent)
             .filter_by(company_id=company_id, warehouse_id=warehouse_id)
-            .order_by(SalesAnomalyEvent.score.desc())
+            .order_by(SalesAnomalyEvent.created_at.desc())
             .all()
         )
         return jsonify([
             {
-                "sale_id": a.sale_id,
-                "warehouse_id": a.warehouse_id,
-                "policy_code": a.policy_code,
-                "score": float(a.score),
-                "level": a.level,
-                "created_at": a.created_at.strftime("%Y-%m-%d %H:%M:%S")
-            }
-            for a in results
+                "sale_id": r.sale_id,
+                "policy_code": r.policy_code,
+                "score": float(r.score),
+                "level": r.level,
+                "created_at": r.created_at.isoformat()
+            } for r in rows
         ])
     finally:
         db.close()
@@ -159,16 +157,37 @@ def get_anomalies(company_id, warehouse_id):
 
 @app.route("/api/v1/reorders", methods=["POST"])
 def compute_reorders():
+    """
+    Body:
+    {
+      "company_id": 1,
+      "warehouse_id": 5,
+      "service_level_z": 1.65,   # optional; default Z95
+      "lead_time_days": 7,       # optional; default LEAD_TIME_DAYS
+      "horizon_days": 30         # optional; forecast horizon window to summarize demand variability
+    }
+    """
     data = request.get_json() or {}
     company_id = data.get("company_id")
     warehouse_id = data.get("warehouse_id")
+    service_level_z = data.get("service_level_z")  # optional
+    lead_time_days = data.get("lead_time_days")  # optional
+    horizon_days = int(data.get("horizon_days", 30))
 
     if not company_id or not warehouse_id:
         return jsonify({"status": "error", "message": "company_id and warehouse_id are required"}), 400
 
-    results = generate_reorder_suggestions(company_id, warehouse_id)
+    results = generate_reorder_suggestions(
+        company_id=company_id,
+        warehouse_id=warehouse_id,
+        service_level_z=service_level_z,
+        lead_time_days=lead_time_days,
+        horizon_days=horizon_days
+    )
+
     if not results:
-        return jsonify({"status": "ok", "count": 0, "message": "No suggestions generated."})
+        return jsonify(
+            {"status": "ok", "count": 0, "message": "No forecasts available; generate /api/v1/forecast first."}), 200
 
     db = SessionLocal()
     try:
@@ -220,23 +239,36 @@ def get_reorders(company_id, warehouse_id):
         db.close()
 
 
-@app.route("/api/v1/supplier-scores", methods=["POST"])
+@app.route("/api/v1/suppliers/score", methods=["POST"])
 def compute_supplier_scores():
+    """
+    Body:
+    {
+      "company_id": 1,
+      "period_start": "2025-01-01",
+      "period_end": "2025-01-31"
+    }
+    """
     data = request.get_json() or {}
     company_id = data.get("company_id")
-    start_date = data.get("start_date")
-    end_date = data.get("end_date")
+    period_start = data.get("period_start")
+    period_end = data.get("period_end")
 
-    if not (company_id and start_date and end_date):
-        return jsonify({"status": "error", "message": "company_id, start_date, end_date are required"}), 400
+    if not (company_id and period_start and period_end):
+        return jsonify({"status": "error",
+                        "message": "company_id, period_start, period_end required"}), 400
 
-    scores = calculate_supplier_performance(company_id, start_date, end_date)
-    if not scores:
-        return jsonify({"status": "ok", "count": 0, "message": "No data for given period."})
+    start = datetime.strptime(period_start, "%Y-%m-%d").date()
+    end = datetime.strptime(period_end, "%Y-%m-%d").date()
+
+    results = score_suppliers(company_id, start, end)
+
+    if not results:
+        return jsonify({"status": "ok", "count": 0, "message": "No purchase activity in period"}), 200
 
     db = SessionLocal()
     try:
-        stmt = insert(SupplierPerformanceScore).values(scores)
+        stmt = insert(SupplierPerformanceScore).values(results)
         stmt = stmt.on_conflict_do_update(
             index_elements=[
                 SupplierPerformanceScore.supplier_id,
@@ -254,9 +286,10 @@ def compute_supplier_scores():
                 "generated_at": datetime.utcnow()
             }
         )
+
         db.execute(stmt)
         db.commit()
-        return jsonify({"status": "success", "count": len(scores)})
+        return jsonify({"status": "success", "count": len(results)})
     except Exception as e:
         db.rollback()
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -264,7 +297,7 @@ def compute_supplier_scores():
         db.close()
 
 
-@app.route("/api/v1/supplier-scores/<int:company_id>", methods=["GET"])
+@app.route("/api/v1/suppliers/score/<int:company_id>", methods=["GET"])
 def get_supplier_scores(company_id):
     db = SessionLocal()
     try:
@@ -277,36 +310,36 @@ def get_supplier_scores(company_id):
         return jsonify([
             {
                 "supplier_id": r.supplier_id,
+                "period_start": r.period_start.strftime("%Y-%m-%d"),
+                "period_end": r.period_end.strftime("%Y-%m-%d"),
                 "on_time_rate": float(r.on_time_rate),
                 "accuracy_rate": float(r.accuracy_rate),
                 "rejection_rate": float(r.rejection_rate),
                 "cost_stability": float(r.cost_stability),
                 "overall_score": float(r.overall_score),
-                "period_start": r.period_start.strftime("%Y-%m-%d"),
-                "period_end": r.period_end.strftime("%Y-%m-%d"),
                 "generated_at": r.generated_at.strftime("%Y-%m-%d %H:%M:%S")
-            } for r in rows
+            }
+            for r in rows
         ])
     finally:
         db.close()
 
 
-@app.route("/api/v1/pricing", methods=["POST"])
-def compute_pricing():
+@app.route("/api/v1/pricing/recommend", methods=["POST"])
+def pricing_recommend():
     data = request.get_json() or {}
     company_id = data.get("company_id")
     warehouse_id = data.get("warehouse_id")
+    if not (company_id and warehouse_id):
+        return jsonify({"status": "error", "message": "company_id & warehouse_id required"}), 400
 
-    if not company_id or not warehouse_id:
-        return jsonify({"status": "error", "message": "company_id and warehouse_id are required"}), 400
-
-    results = generate_pricing_recommendations(company_id, warehouse_id)
-    if not results:
-        return jsonify({"status": "ok", "count": 0, "message": "No pricing recommendations generated."})
+    rows = recommend_prices(company_id, warehouse_id)
+    if not rows:
+        return jsonify({"status": "ok", "count": 0, "message": "No valid sales/forecast data"}), 200
 
     db = SessionLocal()
     try:
-        stmt = insert(DynamicPricingRecommendation).values(results)
+        stmt = insert(DynamicPricingRecommendation).values(rows)
         stmt = stmt.on_conflict_do_update(
             index_elements=[
                 DynamicPricingRecommendation.company_id,
@@ -315,6 +348,7 @@ def compute_pricing():
                 DynamicPricingRecommendation.model_version
             ],
             set_={
+                "current_price": stmt.excluded.current_price,
                 "suggested_price": stmt.excluded.suggested_price,
                 "price_change_pct": stmt.excluded.price_change_pct,
                 "expected_demand_change": stmt.excluded.expected_demand_change,
@@ -325,7 +359,7 @@ def compute_pricing():
         )
         db.execute(stmt)
         db.commit()
-        return jsonify({"status": "success", "count": len(results)})
+        return jsonify({"status": "success", "count": len(rows)})
     except Exception as e:
         db.rollback()
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -333,14 +367,14 @@ def compute_pricing():
         db.close()
 
 
-@app.route("/api/v1/pricing/<int:company_id>/<int:warehouse_id>", methods=["GET"])
-def get_pricing(company_id, warehouse_id):
+@app.route("/api/v1/pricing/recommend/<int:company_id>/<int:warehouse_id>", methods=["GET"])
+def pricing_recommend_get(company_id, warehouse_id):
     db = SessionLocal()
     try:
         rows = (
             db.query(DynamicPricingRecommendation)
             .filter_by(company_id=company_id, warehouse_id=warehouse_id)
-            .order_by(DynamicPricingRecommendation.confidence_level.desc())
+            .order_by(DynamicPricingRecommendation.price_change_pct.desc())
             .all()
         )
         return jsonify([
@@ -361,19 +395,38 @@ def get_pricing(company_id, warehouse_id):
 
 @app.route("/api/v1/customers/segments", methods=["POST"])
 def compute_customer_segments():
+    """
+    Body:
+    {
+      "company_id": 1,
+      "customer_column": "customer_id",   // REQUIRED name of column in sales that identifies the customer
+      "days_window": 365,                 // optional (default 365)
+      "warehouse_id": 5                   // optional: restrict to a warehouse
+    }
+    """
     data = request.get_json() or {}
     company_id = data.get("company_id")
+    customer_column = data.get("customer_column")
+    days_window = int(data.get("days_window", 365))
+    warehouse_id = data.get("warehouse_id")
 
-    if not company_id:
-        return jsonify({"status": "error", "message": "company_id is required"}), 400
+    if not company_id or not customer_column:
+        return jsonify({"status": "error",
+                        "message": "company_id and customer_column are required"}), 400
 
-    results = calculate_customer_segments(company_id)
-    if not results:
-        return jsonify({"status": "ok", "count": 0, "message": "No customers found."})
+    rows = calculate_customer_segments(
+        company_id=company_id,
+        customer_column=customer_column,
+        days_window=days_window,
+        warehouse_id=warehouse_id
+    )
+
+    if not rows:
+        return jsonify({"status": "ok", "count": 0, "message": "No eligible sales found."}), 200
 
     db = SessionLocal()
     try:
-        stmt = insert(CustomerSegment).values(results)
+        stmt = insert(CustomerSegment).values(rows)
         stmt = stmt.on_conflict_do_update(
             index_elements=[
                 CustomerSegment.company_id,
@@ -391,7 +444,7 @@ def compute_customer_segments():
         )
         db.execute(stmt)
         db.commit()
-        return jsonify({"status": "success", "count": len(results)})
+        return jsonify({"status": "success", "count": len(rows)})
     except Exception as e:
         db.rollback()
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -412,8 +465,8 @@ def get_customer_segments(company_id):
         return jsonify([
             {
                 "customer_id": r.customer_id,
-                "recency_days": r.recency_days,
-                "frequency": r.frequency,
+                "recency_days": int(r.recency_days),
+                "frequency": int(r.frequency),
                 "monetary_value": float(r.monetary_value),
                 "clv_score": float(r.clv_score),
                 "segment": r.segment,
@@ -424,22 +477,23 @@ def get_customer_segments(company_id):
         db.close()
 
 
-@app.route("/api/v1/sales-performance", methods=["POST"])
-def compute_sales_performance():
+@app.route("/api/v1/salespersons/score", methods=["POST"])
+def salespersons_score():
     data = request.get_json() or {}
     company_id = data.get("company_id")
-    warehouse_id = data.get("warehouse_id")
+    warehouse_id = data.get("warehouse_id")  # optional
+    start_date = data.get("start_date")
+    end_date = data.get("end_date")
+    if not (company_id and start_date and end_date):
+        return jsonify({"status": "error", "message": "company_id, start_date, end_date required"}), 400
 
-    if not (company_id and warehouse_id):
-        return jsonify({"status": "error", "message": "company_id and warehouse_id are required"}), 400
-
-    results = calculate_sales_performance(company_id, warehouse_id)
-    if not results:
-        return jsonify({"status": "ok", "count": 0, "message": "No sales performance data found."})
+    rows = score_salespersons(company_id, warehouse_id, start_date, end_date)
+    if not rows:
+        return jsonify({"status": "ok", "count": 0, "message": "No data"}), 200
 
     db = SessionLocal()
     try:
-        stmt = insert(SalesPerformanceScore).values(results)
+        stmt = insert(SalesPerformanceScore).values(rows)
         stmt = stmt.on_conflict_do_update(
             index_elements=[
                 SalesPerformanceScore.company_id,
@@ -459,7 +513,7 @@ def compute_sales_performance():
         )
         db.execute(stmt)
         db.commit()
-        return jsonify({"status": "success", "count": len(results)})
+        return jsonify({"status": "success", "count": len(rows)})
     except Exception as e:
         db.rollback()
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -467,8 +521,8 @@ def compute_sales_performance():
         db.close()
 
 
-@app.route("/api/v1/sales-performance/<int:company_id>/<int:warehouse_id>", methods=["GET"])
-def get_sales_performance(company_id, warehouse_id):
+@app.route("/api/v1/salespersons/score/<int:company_id>/<int:warehouse_id>", methods=["GET"])
+def salespersons_score_get(company_id, warehouse_id):
     db = SessionLocal()
     try:
         rows = (
@@ -493,22 +547,28 @@ def get_sales_performance(company_id, warehouse_id):
         db.close()
 
 
-@app.route("/api/v1/profitability", methods=["POST"])
-def compute_profitability():
+@app.route("/api/v1/profitability/forecast", methods=["POST"])
+def profitability_forecast():
+    """
+    Body:
+    {
+      "company_id": 1,
+      "warehouse_id": 5
+    }
+    """
     data = request.get_json() or {}
     company_id = data.get("company_id")
     warehouse_id = data.get("warehouse_id")
+    if not (company_id and warehouse_id):
+        return jsonify({"status": "error", "message": "company_id & warehouse_id required"}), 400
 
-    if not company_id or not warehouse_id:
-        return jsonify({"status": "error", "message": "company_id and warehouse_id are required"}), 400
-
-    results = calculate_profitability(company_id, warehouse_id)
-    if not results:
-        return jsonify({"status": "ok", "count": 0, "message": "No profitability data found."})
+    rows = compute_monthly_profitability(company_id, warehouse_id)
+    if not rows:
+        return jsonify({"status": "ok", "count": 0, "message": "No data"}), 200
 
     db = SessionLocal()
     try:
-        stmt = insert(ProfitabilityForecast).values(results)
+        stmt = insert(ProfitabilityForecast).values(rows)
         stmt = stmt.on_conflict_do_update(
             index_elements=[
                 ProfitabilityForecast.company_id,
@@ -529,7 +589,7 @@ def compute_profitability():
         )
         db.execute(stmt)
         db.commit()
-        return jsonify({"status": "success", "count": len(results)})
+        return jsonify({"status": "success", "count": len(rows)})
     except Exception as e:
         db.rollback()
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -537,8 +597,8 @@ def compute_profitability():
         db.close()
 
 
-@app.route("/api/v1/profitability/<int:company_id>/<int:warehouse_id>", methods=["GET"])
-def get_profitability(company_id, warehouse_id):
+@app.route("/api/v1/profitability/forecast/<int:company_id>/<int:warehouse_id>", methods=["GET"])
+def profitability_forecast_get(company_id, warehouse_id):
     db = SessionLocal()
     try:
         rows = (
@@ -556,7 +616,7 @@ def get_profitability(company_id, warehouse_id):
                 "net_profit": float(r.net_profit),
                 "profit_margin": float(r.profit_margin),
                 "trend": r.trend,
-                "forecast_profit": float(r.forecast_profit) if r.forecast_profit else None,
+                "forecast_profit": float(r.forecast_profit) if r.forecast_profit is not None else None,
                 "generated_at": r.generated_at.strftime("%Y-%m-%d %H:%M:%S")
             } for r in rows
         ])
@@ -565,21 +625,39 @@ def get_profitability(company_id, warehouse_id):
 
 
 @app.route("/api/v1/inventory/optimize", methods=["POST"])
-def compute_inventory_optimization():
+def inventory_optimize():
+    """
+    Body:
+    {
+      "company_id": 1,
+      "warehouse_id": 5,
+      "service_level_z": 1.65,      // optional (default Z95)
+      "lead_time_days": 7,          // optional (default LEAD_TIME_DAYS)
+      "horizon_days": 30,           // optional (default DEFAULT_FORECAST_DAYS)
+      "lookback_days": 90           // optional (default 90)
+    }
+    """
     data = request.get_json() or {}
     company_id = data.get("company_id")
     warehouse_id = data.get("warehouse_id")
+    if not (company_id and warehouse_id):
+        return jsonify({"status": "error", "message": "company_id & warehouse_id required"}), 400
 
-    if not company_id or not warehouse_id:
-        return jsonify({"status": "error", "message": "company_id and warehouse_id are required"}), 400
+    rows = optimize_inventory(
+        company_id=company_id,
+        warehouse_id=warehouse_id,
+        service_level_z=data.get("service_level_z"),
+        lead_time_days=data.get("lead_time_days"),
+        horizon_days=int(data.get("horizon_days", DEFAULT_FORECAST_DAYS)),
+        lookback_days=int(data.get("lookback_days", 90))
+    )
 
-    results = optimize_inventory(company_id, warehouse_id)
-    if not results:
-        return jsonify({"status": "ok", "count": 0, "message": "No inventory data found."})
+    if not rows:
+        return jsonify({"status": "ok", "count": 0, "message": "No data (no stock or demand found)"}), 200
 
     db = SessionLocal()
     try:
-        stmt = insert(InventoryOptimization).values(results)
+        stmt = insert(InventoryOptimization).values(rows)
         stmt = stmt.on_conflict_do_update(
             index_elements=[
                 InventoryOptimization.company_id,
@@ -594,12 +672,13 @@ def compute_inventory_optimization():
                 "optimal_stock_level": stmt.excluded.optimal_stock_level,
                 "stock_status": stmt.excluded.stock_status,
                 "inventory_health_score": stmt.excluded.inventory_health_score,
+                "forecast_horizon_days": stmt.excluded.forecast_horizon_days,
                 "generated_at": datetime.utcnow()
             }
         )
         db.execute(stmt)
         db.commit()
-        return jsonify({"status": "success", "count": len(results)})
+        return jsonify({"status": "success", "count": len(rows)})
     except Exception as e:
         db.rollback()
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -608,13 +687,13 @@ def compute_inventory_optimization():
 
 
 @app.route("/api/v1/inventory/optimize/<int:company_id>/<int:warehouse_id>", methods=["GET"])
-def get_inventory_optimization(company_id, warehouse_id):
+def inventory_optimize_get(company_id, warehouse_id):
     db = SessionLocal()
     try:
         rows = (
             db.query(InventoryOptimization)
             .filter_by(company_id=company_id, warehouse_id=warehouse_id)
-            .order_by(InventoryOptimization.inventory_health_score.desc())
+            .order_by(InventoryOptimization.inventory_health_score.asc())
             .all()
         )
         return jsonify([
@@ -626,6 +705,7 @@ def get_inventory_optimization(company_id, warehouse_id):
                 "optimal_stock_level": float(r.optimal_stock_level),
                 "stock_status": r.stock_status,
                 "inventory_health_score": float(r.inventory_health_score),
+                "forecast_horizon_days": int(r.forecast_horizon_days),
                 "generated_at": r.generated_at.strftime("%Y-%m-%d %H:%M:%S")
             } for r in rows
         ])
@@ -633,22 +713,28 @@ def get_inventory_optimization(company_id, warehouse_id):
         db.close()
 
 
-@app.route("/api/v1/cashflow", methods=["POST"])
-def compute_cashflow_route():
+@app.route("/api/v1/cashflow/forecast", methods=["POST"])
+def cashflow_forecast():
+    """
+    {
+      "company_id": 1,
+      "warehouse_id": 5
+    }
+    """
     data = request.get_json() or {}
     company_id = data.get("company_id")
     warehouse_id = data.get("warehouse_id")
 
     if not (company_id and warehouse_id):
-        return jsonify({"status": "error", "message": "company_id and warehouse_id are required"}), 400
+        return jsonify({"status": "error", "message": "company_id & warehouse_id required"}), 400
 
-    results = compute_cashflow(company_id, warehouse_id)
-    if not results:
-        return jsonify({"status": "ok", "count": 0, "message": "No cashflow data found."})
+    rows = compute_cashflow_forecast(company_id, warehouse_id)
+    if not rows:
+        return jsonify({"status": "ok", "count": 0, "message": "No data"}), 200
 
     db = SessionLocal()
     try:
-        stmt = insert(CashflowForecast).values(results)
+        stmt = insert(CashflowForecast).values(rows)
         stmt = stmt.on_conflict_do_update(
             index_elements=[
                 CashflowForecast.company_id,
@@ -669,7 +755,7 @@ def compute_cashflow_route():
         )
         db.execute(stmt)
         db.commit()
-        return jsonify({"status": "success", "count": len(results)})
+        return jsonify({"status": "success", "count": len(rows)})
     except Exception as e:
         db.rollback()
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -677,8 +763,8 @@ def compute_cashflow_route():
         db.close()
 
 
-@app.route("/api/v1/cashflow/<int:company_id>/<int:warehouse_id>", methods=["GET"])
-def get_cashflow(company_id, warehouse_id):
+@app.route("/api/v1/cashflow/forecast/<int:company_id>/<int:warehouse_id>", methods=["GET"])
+def cashflow_forecast_get(company_id, warehouse_id):
     db = SessionLocal()
     try:
         rows = (
@@ -704,6 +790,7 @@ def get_cashflow(company_id, warehouse_id):
         db.close()
 
 
-@app.route("/api/v1/health")
-def health():
-    return jsonify({"status": "ok"})
+if __name__ == "__main__":
+    from config import config
+
+    app.run(host=config.FLASK_HOST, port=config.FLASK_PORT)

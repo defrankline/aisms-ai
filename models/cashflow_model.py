@@ -19,7 +19,7 @@ def compute_cashflow(company_id, warehouse_id):
                                  JOIN sale_payment_methods spm ON s.id = spm.sale_id
                         WHERE s.company_id = :company_id
                           AND s.warehouse_id = :warehouse_id
-                          AND s.status IN ('PAID', 'DELIVERED')
+                          AND s.status IN ('PAID', 'DELIVERED', 'CONFIRMED')
                         GROUP BY DATE_TRUNC('month', s.date)
                         ORDER BY month;
                         """)

@@ -18,7 +18,7 @@ def generate_pricing_recommendations(company_id, warehouse_id):
                           JOIN sale_lines sl ON s.id = sl.sale_id
                  WHERE s.company_id = :company_id
                    AND s.warehouse_id = :warehouse_id
-                   AND s.status IN ('PAID', 'DELIVERED')
+                   AND s.status IN ('PAID', 'DELIVERED', 'CONFIRMED')
                    AND s.date >= CURRENT_DATE - INTERVAL '60 days'
                  GROUP BY sl.product_id, sl.unit_price
                  ORDER BY sl.product_id, sl.unit_price;

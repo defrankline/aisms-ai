@@ -19,7 +19,7 @@ def calculate_customer_segments(company_id, days_window=365):
                  FROM sales s
                           JOIN sale_lines sl ON s.id = sl.sale_id
                  WHERE s.company_id = :company_id
-                   AND s.status IN ('PAID', 'DELIVERED')
+                   AND s.status IN ('PAID', 'DELIVERED', 'CONFIRMED')
                    AND s.date >= CURRENT_DATE - INTERVAL ':days_window days'
                  GROUP BY s.company_id, s.id, s.date, s.cashier_id
                  """)
