@@ -791,6 +791,7 @@ def cashflow_forecast_get(company_id, warehouse_id):
 
 
 if __name__ == "__main__":
-    from config import config
+    from dotenv import load_dotenv
 
-    app.run(host=config.FLASK_HOST, port=config.FLASK_PORT)
+    load_dotenv()
+    app.run(host="0.0.0.0", port=5001)
