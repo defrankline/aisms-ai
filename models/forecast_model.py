@@ -43,19 +43,17 @@ def train_and_predict(company_id: int, warehouse_id: int, days_ahead: int = DEFA
 
     # Pull daily sales per SKU
     base_query = """
-        SELECT
-            sl.product_id,
-            DATE(s.date) AS ds,
-            SUM(sl.quantity) AS y
-        FROM sales s
-        JOIN sale_lines sl ON s.id = sl.sale_id
-        WHERE s.company_id = :company_id
-          AND s.warehouse_id = :warehouse_id
-          AND s.status IN ('PAID','DELIVERED')
-        {product_filter}
-        GROUP BY sl.product_id, DATE(s.date)
-        ORDER BY sl.product_id, ds
-    """
+                 SELECT sl.product_id,
+                        DATE(s.date)     AS ds,
+                        SUM(sl.quantity) AS y
+                 FROM sales s
+                          JOIN sale_lines sl ON s.id = sl.sale_id
+                 WHERE s.company_id = :company_id
+                   AND s.warehouse_id = :warehouse_id
+                   AND s.status IN ('PAID', 'DELIVERED', 'CONFIRMED') {product_filter}
+                 GROUP BY sl.product_id, DATE (s.date)
+                 ORDER BY sl.product_id, ds \
+                 """
 
     product_filter = ""
     params = {"company_id": company_id, "warehouse_id": warehouse_id}
@@ -87,12 +85,13 @@ def train_and_predict(company_id: int, warehouse_id: int, days_ahead: int = DEFA
         tail = forecast.tail(days_ahead)[["ds", "yhat"]]
 
         for _, row in tail.iterrows():
+            yhat = max(0.0, float(row["yhat"]))  # clamp negative forecasts
             results.append({
                 "company_id": company_id,
                 "warehouse_id": warehouse_id,
                 "product_id": int(pid),
                 "forecast_date": row["ds"].date(),
-                "predicted_quantity": float(row["yhat"]),
+                "predicted_quantity": yhat,
                 "model_version": MODEL_VERSION
             })
 

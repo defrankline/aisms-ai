@@ -2,11 +2,16 @@ Flask==3.1.2
 Flask-Cors==6.0.1
 psycopg2-binary==2.9.11
 SQLAlchemy==2.0.44
-pandas==2.3.3
-numpy==2.3.4
-scikit-learn==1.7.2
-prophet==1.2.1
-joblib==1.5.2
+pandas==2.2.2
+numpy==1.26.4
+scikit-learn==1.5.2
+
+# Prophet + stable backend
+prophet==1.1.5
+cmdstanpy==1.2.2
+
+joblib==1.4.2
 python-dotenv==1.2.1
 types-pytz>=2022.1.1
 gunicorn==22.0.0
+plotly==5.24.1

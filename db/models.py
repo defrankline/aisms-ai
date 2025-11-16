@@ -45,19 +45,27 @@ class SalesAnomalyEvent(Base):
 # 3) Reorder Suggestions
 class ReorderSuggestion(Base):
     __tablename__ = "reorder_suggestions"
+
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     company_id = Column(BigInteger, nullable=False)
     warehouse_id = Column(BigInteger, nullable=False)
     product_id = Column(BigInteger, nullable=False)
-    reorder_point = Column(Numeric(12, 3), nullable=False)
-    safety_stock = Column(Numeric(12, 3), nullable=False)
-    suggested_qty = Column(Numeric(12, 3), nullable=False)
-    model_version = Column(String(50), default="v1.0")
+
+    avg_daily_demand = Column(Numeric(14, 3), nullable=False)
+    std_daily_demand = Column(Numeric(14, 3), nullable=False)
+
+    reorder_point = Column(Numeric(14, 3), nullable=False)
+    safety_stock = Column(Numeric(14, 3), nullable=False)
+    suggested_qty = Column(Numeric(14, 3), nullable=False)
+    stock_in_hand = Column(Numeric(14, 3), nullable=False)
+
+    model_version = Column(String(50), nullable=False)
     generated_at = Column(TIMESTAMP, default=datetime.utcnow)
+
     __table_args__ = (
         UniqueConstraint(
             "company_id", "warehouse_id", "product_id", "model_version",
-            name="uq_reorder_company_wh_prod_model"
+            name="uq_reorder_unique"
         ),
     )
 
