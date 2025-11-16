@@ -1,9 +1,11 @@
+import logging
 from datetime import datetime
 
-from flask import Flask
-from flask import request, jsonify
+from flask import Flask, request, jsonify
 from flask_cors import CORS
+from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import SQLAlchemyError
 
 from db.connection import engine, SessionLocal
 from db.models import Base, SkuDemandForecast, SalesAnomalyEvent, ReorderSuggestion, SupplierPerformanceScore, \
@@ -21,11 +23,30 @@ from models.sales_performance_model import score_salespersons
 from models.supplier_performance_model import score_suppliers
 from utils.ai_config import DEFAULT_FORECAST_DAYS
 
+# ✅ Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+logger = logging.getLogger("AismsAI")
+
 app = Flask(__name__)
 CORS(app)
 
-# Ensure tables exist
-Base.metadata.create_all(bind=engine)
+# ✅ Database initialization and health check
+try:
+    Base.metadata.create_all(bind=engine)
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+    logger.info("✅ Database connection established successfully.")
+except SQLAlchemyError as e:
+    logger.error(f"❌ Database connection failed: {e}")
+except Exception as ex:
+    logger.error(f"❌ Unexpected error during startup: {ex}")
+else:
+    logger.info("✅ All AI service tables ensured in database.")
+
+logger.info("🚀 AismsAI Flask service initialized successfully.")
 
 
 @app.route("/api/v1/health", methods=["GET"])
