@@ -8,6 +8,7 @@ from utils.ai_config import MODEL_VERSION
 
 
 def _slope(values: list[float]) -> float:
+    """Trend slope using linear regression"""
     if len(values) < 2:
         return 0.0
     x = np.arange(len(values))
@@ -17,7 +18,8 @@ def _slope(values: list[float]) -> float:
 
 def compute_monthly_profitability(company_id: int, warehouse_id: int):
     """
-    Monthly P&L and one-month-ahead forecast of net profit.
+    Builds monthly P&L summary + forecast for next month.
+    Returns rows ready for insertion into profitability_forecast table.
     """
 
     # Revenue per month
@@ -33,7 +35,7 @@ def compute_monthly_profitability(company_id: int, warehouse_id: int):
                  ORDER BY month
                  """)
 
-    # COGS proxy per month (sum of received cost this month)
+    # COGS per month
     q_cogs = text("""
                   SELECT DATE_TRUNC('month', p.date)::date        AS month,
                          SUM(pl.quantity_received * pl.unit_cost) AS cogs
@@ -59,6 +61,21 @@ def compute_monthly_profitability(company_id: int, warehouse_id: int):
                  ORDER BY month
                  """)
 
+    # Warehouse name lookup
+    q_warehouse = text("""
+                       SELECT name
+                       FROM warehouses
+                       WHERE id = :warehouse_id
+                       LIMIT 1
+                       """)
+
+    warehouse_name = pd.read_sql(
+        q_warehouse,
+        engine,
+        params={"warehouse_id": warehouse_id}
+    )["name"].iloc[0]
+
+    # Execute queries
     rev = pd.read_sql(q_rev, engine, params={"company_id": company_id, "warehouse_id": warehouse_id})
     cogs = pd.read_sql(q_cogs, engine, params={"company_id": company_id, "warehouse_id": warehouse_id})
     exp = pd.read_sql(q_exp, engine, params={"company_id": company_id, "warehouse_id": warehouse_id})
@@ -66,40 +83,60 @@ def compute_monthly_profitability(company_id: int, warehouse_id: int):
     if rev.empty and cogs.empty and exp.empty:
         return []
 
-    df = rev.merge(cogs, on="month", how="outer").merge(exp, on="month", how="outer").fillna(0)
-    df = df.sort_values("month")
-    df["net_profit"] = df["revenue"] - df["cogs"] - df["expenses"]
-    df["profit_margin"] = (df["net_profit"] / df["revenue"].replace(0, np.nan)).fillna(0)
+    # Merge into one table
+    df = (
+        rev.merge(cogs, on="month", how="outer")
+        .merge(exp, on="month", how="outer")
+        .fillna(0)
+        .sort_values("month")
+    )
 
-    # Trend label on last 6 months net_profit
+    # Profit calculations
+    df["net_profit"] = df["revenue"] - df["cogs"] - df["expenses"]
+    df["profit_margin"] = (
+            df["net_profit"] /
+            df["revenue"].replace(0, np.nan)
+    ).fillna(0).clip(-10, 10)
+
+    # Trend analysis
     last_n = df.tail(6)
     slope = _slope(last_n["net_profit"].tolist())
     trend = "UP" if slope > 0 else ("DOWN" if slope < 0 else "FLAT")
 
-    # Prophet forecast next month net_profit
+    # Prophet forecast (1 month ahead)
     prophet_df = df[["month", "net_profit"]].rename(columns={"month": "ds", "net_profit": "y"})
-    model = Prophet()
-    if len(prophet_df) >= 2:
+
+    if len(prophet_df) >= 3:
+        model = Prophet(
+            yearly_seasonality=False,
+            weekly_seasonality=False,
+            daily_seasonality=False
+        )
         model.fit(prophet_df)
         future = model.make_future_dataframe(periods=1, freq="MS")
         yhat = float(model.predict(future).tail(1)["yhat"].iloc[0])
     else:
-        yhat = float(df["net_profit"].iloc[-1] if not df.empty else 0.0)
+        yhat = float(df["net_profit"].iloc[-1])
 
-    # Prepare rows for each month in df
+    # Never return negative forecast
+    yhat = max(0, yhat)
+
+    # Build response rows
     rows = []
     for _, r in df.iterrows():
         rows.append({
             "company_id": company_id,
             "warehouse_id": warehouse_id,
+            "warehouse_name": warehouse_name,
             "month": pd.to_datetime(r["month"]).date(),
             "total_revenue": float(r["revenue"]),
             "total_cogs": float(r["cogs"]),
             "total_expenses": float(r["expenses"]),
             "net_profit": float(r["net_profit"]),
             "profit_margin": float(r["profit_margin"]),
-            "trend": trend,  # same label for current context
+            "trend": trend,
             "forecast_profit": round(yhat, 2),
             "model_version": MODEL_VERSION
         })
+
     return rows

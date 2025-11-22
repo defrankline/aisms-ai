@@ -31,15 +31,32 @@ class SkuDemandForecast(Base):
 # 2) Anomaly Detection
 class SalesAnomalyEvent(Base):
     __tablename__ = "sales_anomaly_event"
+
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+
+    # Identifiers
     sale_id = Column(BigInteger, nullable=False)
     company_id = Column(BigInteger, nullable=False)
     warehouse_id = Column(BigInteger, nullable=False)
+
+    # Extra data for UI
+    sale_date = Column(Date, nullable=False)
+    reference_number = Column(String(255), nullable=False)
+    warehouse_name = Column(String(255), nullable=False)
+    total_amount = Column(Numeric(32, 2), nullable=False)
+
+    reason = Column(String(500), nullable=False)
+
+    # ML policy metadata
     policy_code = Column(String(50), nullable=False)
     score = Column(Numeric(10, 4), nullable=False)
     level = Column(String(20), nullable=False)
+
     created_at = Column(TIMESTAMP, default=datetime.utcnow)
-    __table_args__ = (UniqueConstraint("sale_id", "policy_code", name="uq_sale_policy"),)
+
+    __table_args__ = (
+        UniqueConstraint("sale_id", "policy_code", name="uq_sale_policy"),
+    )
 
 
 # 3) Reorder Suggestions
@@ -163,22 +180,36 @@ class SalesPerformanceScore(Base):
 # 8) Profitability
 class ProfitabilityForecast(Base):
     __tablename__ = "profitability_forecast"
+
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+
     company_id = Column(BigInteger, nullable=False)
     warehouse_id = Column(BigInteger, nullable=False)
+
+    # Newly added (correct)
+    warehouse_name = Column(String(255), nullable=False)
+
     month = Column(Date, nullable=False)
+
     total_revenue = Column(Numeric(14, 2), nullable=False)
     total_cogs = Column(Numeric(14, 2), nullable=False)
     total_expenses = Column(Numeric(14, 2), nullable=False)
+
     net_profit = Column(Numeric(14, 2), nullable=False)
     profit_margin = Column(Numeric(6, 2), nullable=False)
+
     trend = Column(String(20), nullable=False)
     forecast_profit = Column(Numeric(14, 2))
+
     model_version = Column(String(50), default="v1.0")
     generated_at = Column(TIMESTAMP, default=datetime.utcnow)
+
     __table_args__ = (
         UniqueConstraint(
-            "company_id", "warehouse_id", "month", "model_version",
+            "company_id",
+            "warehouse_id",
+            "month",
+            "model_version",
             name="uq_profit_company_wh_month_model"
         ),
     )
