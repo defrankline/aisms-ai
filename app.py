@@ -25,6 +25,8 @@ from models.reorder_model import generate_reorder_suggestions
 from models.sales_performance_model import score_salespersons
 from models.supplier_performance_model import score_suppliers
 from utils.ai_config import DEFAULT_FORECAST_DAYS, MODEL_VERSION
+import math
+from decimal import Decimal
 
 # ✅ Configure logging
 logging.basicConfig(
@@ -867,6 +869,24 @@ def inventory_optimize_get(company_id, warehouse_id):
         db.close()
 
 
+def to_float(value, default=0.0):
+    """
+    Safely cast values to float.
+    Handles None, Decimal, numpy.nan, strings, etc.
+    """
+    if value is None:
+        return default
+    if isinstance(value, Decimal):
+        return float(value)
+    try:
+        value = float(value)
+        if math.isnan(value) or math.isinf(value):
+            return default
+        return value
+    except (TypeError, ValueError):
+        return default
+
+
 @app.route("/api/v1/cashflow/forecast", methods=["POST"])
 def cashflow_forecast():
     """
@@ -883,6 +903,14 @@ def cashflow_forecast():
         return jsonify({"status": "error", "message": "company_id & warehouse_id required"}), 400
 
     rows = compute_cashflow(company_id, warehouse_id)
+    for r in rows:
+        r["cash_inflows"] = to_float(r.get("cash_inflows"))
+        r["cash_outflows"] = to_float(r.get("cash_outflows"))
+        r["net_cashflow"] = to_float(r.get("net_cashflow"))
+        r["cash_balance"] = to_float(r.get("cash_balance"))
+        r["cash_health_score"] = to_float(r.get("cash_health_score"))
+        r["forecasted_next_balance"] = to_float(r.get("forecasted_next_balance"))
+
     if not rows:
         return jsonify({"status": "ok", "count": 0, "message": "No data"}), 200
 
