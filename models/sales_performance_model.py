@@ -1,4 +1,7 @@
+import math
+import uuid
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 import pandas as pd
 from sqlalchemy import text
@@ -97,15 +100,34 @@ def score_salespersons(company_id: int, warehouse_id: int | None, start_date: st
     results = []
     for _, r in merged.iterrows():
         results.append({
+            "id": str(uuid.uuid4()),  # ✅ REQUIRED
             "company_id": company_id,
-            "warehouse_id": warehouse_id if warehouse_id is not None else 0,
+            "warehouse_id": warehouse_id,
             "salesperson_id": int(r["sales_person_id"]),
-            "total_sales": float(r["total_sales"]),
+            "total_sales": to_float(r["total_sales"]),
             "total_orders": int(r["total_orders"]),
-            "avg_order_value": float(r["avg_order_value"]),
-            "growth_rate": float(r["growth_rate"]),
+            "avg_order_value": to_float(r["avg_order_value"]),
+            "growth_rate": to_float(r["growth_rate"]),
             "performance_trend": str(r["performance_trend"]),
-            "performance_score": float(r["performance_score"]),
-            "model_version": MODEL_VERSION
+            "performance_score": to_float(r["performance_score"]),
+            "model_version": MODEL_VERSION,
         })
     return results
+
+
+def to_float(value, default=0.0):
+    """
+    Safely cast values to float.
+    Handles None, Decimal, numpy.nan, strings, etc.
+    """
+    if value is None:
+        return default
+    if isinstance(value, Decimal):
+        return float(value)
+    try:
+        value = float(value)
+        if math.isnan(value) or math.isinf(value):
+            return default
+        return value
+    except (TypeError, ValueError):
+        return default

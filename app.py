@@ -1,5 +1,7 @@
 import logging
+import math
 from datetime import datetime
+from decimal import Decimal
 
 import numpy as np
 from flask import Flask
@@ -25,8 +27,6 @@ from models.reorder_model import generate_reorder_suggestions
 from models.sales_performance_model import score_salespersons
 from models.supplier_performance_model import score_suppliers
 from utils.ai_config import DEFAULT_FORECAST_DAYS, MODEL_VERSION
-import math
-from decimal import Decimal
 
 # ✅ Configure logging
 logging.basicConfig(
@@ -651,12 +651,7 @@ def salespersons_score():
     try:
         stmt = insert(SalesPerformanceScore).values(rows)
         stmt = stmt.on_conflict_do_update(
-            index_elements=[
-                SalesPerformanceScore.company_id,
-                SalesPerformanceScore.warehouse_id,
-                SalesPerformanceScore.salesperson_id,
-                SalesPerformanceScore.model_version
-            ],
+            constraint="uq_sales_performance_company_wh_person_model",
             set_={
                 "total_sales": stmt.excluded.total_sales,
                 "total_orders": stmt.excluded.total_orders,
