@@ -1,9 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import (
-    Column, String, Numeric, Date, TIMESTAMP, BigInteger, UniqueConstraint
-)
+from sqlalchemy import Column, String, Numeric, Date, TIMESTAMP, BigInteger, UniqueConstraint
 from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
@@ -260,4 +258,240 @@ class CashflowForecast(Base):
             "company_id", "warehouse_id", "month", "model_version",
             name="uq_cashflow_company_wh_month_model"
         ),
+    )
+
+
+# 11) Stock Movement Anomaly (Inventory events)
+class StockMovementAnomalyEvent(Base):
+    __tablename__ = "stock_movement_anomaly_event"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    company_id = Column(BigInteger, nullable=False)
+    warehouse_id = Column(BigInteger, nullable=False)
+    product_id = Column(BigInteger, nullable=False)
+    stock_movement_id = Column(BigInteger, nullable=False)
+
+    movement_date = Column(Date, nullable=False)
+    movement_type_id = Column(BigInteger, nullable=False)
+
+    quantity = Column(Numeric(14, 3), nullable=False)
+    unit_cost = Column(Numeric(14, 4))
+    source = Column(String(255))
+
+    policy_code = Column(String(50), nullable=False)  # QTY_Z, QTY_P99, COST_P99, BURST_24H, ISO
+    score = Column(Numeric(10, 4), nullable=False)  # 0..1
+    level = Column(String(20), nullable=False)  # INFO/WARN/ALERT
+    reason = Column(String(500), nullable=False)
+
+    model_version = Column(String(50), default="v1.0")
+    created_at = Column(TIMESTAMP, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("company_id", "stock_movement_id", "policy_code", "model_version",
+                         name="uq_stock_mv_policy_model"),
+    )
+
+
+# 12) Stocktake Variance Risk
+class StocktakeVarianceRisk(Base):
+    __tablename__ = "stocktake_variance_risk"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    company_id = Column(BigInteger, nullable=False)
+    warehouse_id = Column(BigInteger, nullable=False)
+    product_id = Column(BigInteger, nullable=False)
+
+    lookback_days = Column(BigInteger, nullable=False)
+
+    risk_score = Column(Numeric(10, 4), nullable=False)  # 0..1
+    risk_level = Column(String(20), nullable=False)  # LOW/MEDIUM/HIGH
+    expected_abs_variance = Column(Numeric(14, 3))
+    drivers = Column(String(2000))  # JSON string
+
+    model_version = Column(String(50), default="v1.0")
+    generated_at = Column(TIMESTAMP, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("company_id", "warehouse_id", "product_id", "model_version",
+                         name="uq_stocktake_risk_company_wh_prod_model"),
+    )
+
+
+# 13) Transfer Recommendations
+class TransferRecommendation(Base):
+    __tablename__ = "transfer_recommendations"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    company_id = Column(BigInteger, nullable=False)
+    product_id = Column(BigInteger, nullable=False)
+
+    from_warehouse_id = Column(BigInteger, nullable=False)
+    to_warehouse_id = Column(BigInteger, nullable=False)
+
+    suggested_qty = Column(Numeric(14, 3), nullable=False)
+
+    from_on_hand = Column(Numeric(14, 3), nullable=False)
+    to_on_hand = Column(Numeric(14, 3), nullable=False)
+
+    from_days_cover = Column(Numeric(14, 3))
+    to_days_cover = Column(Numeric(14, 3))
+
+    rationale = Column(String(500), nullable=False)
+    confidence = Column(Numeric(6, 2), nullable=False)  # 0..100
+
+    model_version = Column(String(50), default="v1.0")
+    generated_at = Column(TIMESTAMP, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("company_id", "product_id", "from_warehouse_id", "to_warehouse_id", "model_version",
+                         name="uq_transfer_rec_company_prod_from_to_model"),
+    )
+
+
+# 14) Stockout Risk
+class StockoutRisk(Base):
+    __tablename__ = "stockout_risk"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    company_id = Column(BigInteger, nullable=False)
+    warehouse_id = Column(BigInteger, nullable=False)
+    product_id = Column(BigInteger, nullable=False)
+
+    horizon_days = Column(BigInteger, nullable=False)
+    lookback_days = Column(BigInteger, nullable=False)
+
+    on_hand = Column(Numeric(14, 3), nullable=False)
+    avg_daily_demand = Column(Numeric(14, 3), nullable=False)
+    std_daily_demand = Column(Numeric(14, 3), nullable=False)
+
+    expected_demand = Column(Numeric(14, 3), nullable=False)
+    stockout_probability = Column(Numeric(10, 4), nullable=False)  # 0..1
+    expected_stockout_date = Column(Date)
+
+    recommended_qty = Column(Numeric(14, 3), nullable=False)
+    risk_level = Column(String(20), nullable=False)
+
+    model_version = Column(String(50), default="v1.0")
+    generated_at = Column(TIMESTAMP, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("company_id", "warehouse_id", "product_id", "horizon_days", "model_version",
+                         name="uq_stockout_company_wh_prod_horizon_model"),
+    )
+
+
+# 15) Slow Mover / Dead Stock Risk
+class SlowMoverRisk(Base):
+    __tablename__ = "slow_mover_risk"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    company_id = Column(BigInteger, nullable=False)
+    warehouse_id = Column(BigInteger, nullable=False)
+    product_id = Column(BigInteger, nullable=False)
+
+    lookback_days = Column(BigInteger, nullable=False)
+
+    on_hand = Column(Numeric(14, 3), nullable=False)
+    avg_daily_sales = Column(Numeric(14, 3), nullable=False)
+    days_since_last_sale = Column(BigInteger, nullable=False)
+    days_cover = Column(Numeric(14, 3), nullable=False)
+
+    slow_mover_score = Column(Numeric(10, 4), nullable=False)  # 0..1
+    risk_level = Column(String(20), nullable=False)
+
+    recommended_action = Column(String(255), nullable=False)
+    rationale = Column(String(500), nullable=False)
+
+    model_version = Column(String(50), default="v1.0")
+    generated_at = Column(TIMESTAMP, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("company_id", "warehouse_id", "product_id", "model_version",
+                         name="uq_slow_mover_company_wh_prod_model"),
+    )
+
+
+# 16) Return Pressure Index
+class ReturnPressureIndex(Base):
+    __tablename__ = "return_pressure_index"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    company_id = Column(BigInteger, nullable=False)
+    warehouse_id = Column(BigInteger, nullable=False)
+    product_id = Column(BigInteger, nullable=False)
+
+    period_days = Column(BigInteger, nullable=False)
+
+    sale_out_qty = Column(Numeric(14, 3), nullable=False)
+    return_in_qty = Column(Numeric(14, 3), nullable=False)
+    return_rate = Column(Numeric(10, 4), nullable=False)
+
+    score = Column(Numeric(10, 4), nullable=False)  # 0..1
+    level = Column(String(20), nullable=False)
+    trend = Column(String(20), nullable=False)  # UP/DOWN/STABLE
+
+    model_version = Column(String(50), default="v1.0")
+    generated_at = Column(TIMESTAMP, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("company_id", "warehouse_id", "product_id", "period_days", "model_version",
+                         name="uq_return_pressure_company_wh_prod_period_model"),
+    )
+
+
+# 17) Receipt Cost Alerts
+class ReceiptCostAlert(Base):
+    __tablename__ = "receipt_cost_alerts"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    company_id = Column(BigInteger, nullable=False)
+    warehouse_id = Column(BigInteger, nullable=False)
+    product_id = Column(BigInteger, nullable=False)
+
+    lookback_days = Column(BigInteger, nullable=False)
+    short_window_days = Column(BigInteger, nullable=False)
+    long_window_days = Column(BigInteger, nullable=False)
+
+    avg_cost_short = Column(Numeric(14, 4), nullable=False)
+    avg_cost_long = Column(Numeric(14, 4), nullable=False)
+    cost_change_pct = Column(Numeric(10, 4), nullable=False)
+    volatility_lookback = Column(Numeric(10, 4), nullable=False)
+
+    level = Column(String(20), nullable=False)  # INFO/WARN/ALERT
+    message = Column(String(500), nullable=False)
+
+    model_version = Column(String(50), default="v1.0")
+    generated_at = Column(TIMESTAMP, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("company_id", "warehouse_id", "product_id", "model_version",
+                         name="uq_receipt_cost_company_wh_prod_model"),
+    )
+
+
+# 18) Forecast Metrics (accuracy + drift)
+class ForecastModelMetric(Base):
+    __tablename__ = "forecast_model_metrics"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    company_id = Column(BigInteger, nullable=False)
+    warehouse_id = Column(BigInteger, nullable=False)
+    product_id = Column(BigInteger, nullable=False)
+
+    lookback_days = Column(BigInteger, nullable=False)
+
+    mae = Column(Numeric(14, 4), nullable=False)
+    mape = Column(Numeric(10, 4), nullable=False)
+    bias = Column(Numeric(14, 4), nullable=False)
+
+    drift_score = Column(Numeric(10, 4), nullable=False)  # 0..1
+    drift_level = Column(String(20), nullable=False)  # LOW/MED/HIGH
+    notes = Column(String(500), nullable=False)
+
+    model_version = Column(String(50), default="v1.0")
+    generated_at = Column(TIMESTAMP, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("company_id", "warehouse_id", "product_id", "model_version",
+                         name="uq_forecast_metrics_company_wh_prod_model"),
     )

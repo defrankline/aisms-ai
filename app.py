@@ -7,6 +7,9 @@ import numpy as np
 from flask import Flask
 from flask import request, jsonify
 from flask_cors import CORS
+from models.stock_movement_anomaly_model import detect_stock_movement_anomalies
+from models.stocktake_variance_model import compute_stocktake_variance_risk
+from models.transfer_recommendation_model import recommend_transfers
 from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
@@ -16,15 +19,24 @@ from db.connection import engine
 from db.models import Base, SkuDemandForecast, SalesAnomalyEvent, ReorderSuggestion, SupplierPerformanceScore, \
     CustomerSegment, DynamicPricingRecommendation, SalesPerformanceScore, ProfitabilityForecast, InventoryOptimization, \
     CashflowForecast
+from db.models import (
+    StockMovementAnomalyEvent, StocktakeVarianceRisk, TransferRecommendation,
+    StockoutRisk, SlowMoverRisk, ReturnPressureIndex, ReceiptCostAlert, ForecastModelMetric
+)
 from models.anomaly_model import detect_sales_anomalies
 from models.cashflow_model import compute_cashflow
 from models.customer_segmentation_model import calculate_customer_segments
 from models.dynamic_pricing_model import recommend_prices
+from models.forecast_metrics_model import compute_forecast_metrics
 from models.forecast_model import train_and_predict
 from models.inventory_optimization_model import optimize_inventory
 from models.profitability_model import compute_monthly_profitability
+from models.receipt_cost_alerts_model import compute_receipt_cost_alerts
 from models.reorder_model import generate_reorder_suggestions
+from models.return_pressure_model import compute_return_pressure
 from models.sales_performance_model import score_salespersons
+from models.slow_mover_model import compute_slow_movers
+from models.stockout_risk_model import compute_stockout_risk
 from models.supplier_performance_model import score_suppliers
 from utils.ai_config import DEFAULT_FORECAST_DAYS, MODEL_VERSION
 
@@ -51,7 +63,7 @@ except Exception as ex:
 else:
     logger.info("✅ All AI service tables ensured in database.")
 
-logger.info("🚀 AismsAI Flask service initialized successfully.")
+logger.info("🚀 AISMS AI Flask service initialized successfully.")
 
 
 @app.errorhandler(Exception)
@@ -963,6 +975,481 @@ def cashflow_forecast_get(company_id, warehouse_id):
                 "generated_at": r.generated_at.strftime("%Y-%m-%d %H:%M:%S")
             } for r in rows
         ])
+    finally:
+        db.close()
+
+
+# -------------------- 11) Stock Movement Anomaly --------------------
+@app.route("/api/v1/anomaly/stock-movements/train", methods=["POST"])
+def train_stock_movement_anomaly():
+    data = request.get_json() or {}
+    company_id = data.get("company_id")
+    warehouse_id = data.get("warehouse_id")
+    days_window = int(data.get("days_window", 90))
+    limit = int(data.get("limit", 200))
+    if not (company_id and warehouse_id):
+        return jsonify({"status": "error", "message": "company_id & warehouse_id required"}), 400
+
+    rows = detect_stock_movement_anomalies(int(company_id), int(warehouse_id), days_window, limit)
+    if not rows:
+        return jsonify({"status": "ok", "count": 0, "message": "No anomalies"}), 200
+
+    db = SessionLocal()
+    try:
+        stmt = insert(StockMovementAnomalyEvent).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_stock_mv_policy_model",
+            set_={"score": stmt.excluded.score, "level": stmt.excluded.level, "reason": stmt.excluded.reason,
+                  "created_at": datetime.utcnow()}
+        )
+        db.execute(stmt);
+        db.commit()
+        return jsonify({"status": "success", "count": len(rows)})
+    except Exception as e:
+        db.rollback();
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/anomaly/stock-movements/<int:company_id>/<int:warehouse_id>", methods=["GET"])
+def get_stock_movement_anomaly(company_id, warehouse_id):
+    limit = int(request.args.get("limit", 200))
+    db = SessionLocal()
+    try:
+        rows = (db.query(StockMovementAnomalyEvent)
+                .filter_by(company_id=company_id, warehouse_id=warehouse_id)
+                .order_by(StockMovementAnomalyEvent.created_at.desc())
+                .limit(limit).all())
+        return jsonify([{
+            "stock_movement_id": r.stock_movement_id,
+            "product_id": r.product_id,
+            "movement_date": r.movement_date.isoformat(),
+            "movement_type_id": r.movement_type_id,
+            "quantity": float(r.quantity),
+            "unit_cost": float(r.unit_cost) if r.unit_cost is not None else None,
+            "policy_code": r.policy_code,
+            "score": float(r.score),
+            "level": r.level,
+            "reason": r.reason,
+            "created_at": r.created_at.isoformat()
+        } for r in rows])
+    finally:
+        db.close()
+
+
+# -------------------- 12) Stocktake Variance Risk --------------------
+@app.route("/api/v1/stocktake/variance-risk/train", methods=["POST"])
+def train_stocktake_variance_risk():
+    data = request.get_json() or {}
+    company_id = data.get("company_id")
+    warehouse_id = data.get("warehouse_id")
+    lookback_days = int(data.get("lookback_days", 180))
+    if not (company_id and warehouse_id):
+        return jsonify({"status": "error", "message": "company_id & warehouse_id required"}), 400
+
+    rows = compute_stocktake_variance_risk(int(company_id), int(warehouse_id), lookback_days)
+    if not rows:
+        return jsonify({"status": "ok", "count": 0, "message": "No data"}), 200
+
+    db = SessionLocal()
+    try:
+        stmt = insert(StocktakeVarianceRisk).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_stocktake_risk_company_wh_prod_model",
+            set_={"lookback_days": stmt.excluded.lookback_days, "risk_score": stmt.excluded.risk_score,
+                  "risk_level": stmt.excluded.risk_level, "drivers": stmt.excluded.drivers,
+                  "generated_at": datetime.utcnow()}
+        )
+        db.execute(stmt);
+        db.commit()
+        return jsonify({"status": "success", "count": len(rows)})
+    except Exception as e:
+        db.rollback();
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/stocktake/variance-risk/<int:company_id>/<int:warehouse_id>", methods=["GET"])
+def get_stocktake_variance_risk(company_id, warehouse_id):
+    limit = int(request.args.get("limit", 500))
+    db = SessionLocal()
+    try:
+        rows = (db.query(StocktakeVarianceRisk)
+                .filter_by(company_id=company_id, warehouse_id=warehouse_id)
+                .order_by(StocktakeVarianceRisk.risk_score.desc())
+                .limit(limit).all())
+        return jsonify([{
+            "product_id": r.product_id,
+            "risk_score": float(r.risk_score),
+            "risk_level": r.risk_level,
+            "drivers": r.drivers,
+            "generated_at": r.generated_at.isoformat()
+        } for r in rows])
+    finally:
+        db.close()
+
+
+# -------------------- 13) Transfer Recommendations --------------------
+@app.route("/api/v1/transfers/recommend/train", methods=["POST"])
+def train_transfer_recommendations():
+    data = request.get_json() or {}
+    company_id = data.get("company_id")
+    days_window = int(data.get("days_window", 60))
+    horizon_days = int(data.get("horizon_days", 14))
+    min_suggest_qty = float(data.get("min_suggest_qty", 1))
+    if not company_id:
+        return jsonify({"status": "error", "message": "company_id required"}), 400
+
+    rows = recommend_transfers(int(company_id), days_window, horizon_days, min_suggest_qty)
+    if not rows:
+        return jsonify({"status": "ok", "count": 0, "message": "No recommendations"}), 200
+
+    db = SessionLocal()
+    try:
+        stmt = insert(TransferRecommendation).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_transfer_rec_company_prod_from_to_model",
+            set_={"suggested_qty": stmt.excluded.suggested_qty, "from_on_hand": stmt.excluded.from_on_hand,
+                  "to_on_hand": stmt.excluded.to_on_hand, "from_days_cover": stmt.excluded.from_days_cover,
+                  "to_days_cover": stmt.excluded.to_days_cover, "rationale": stmt.excluded.rationale,
+                  "confidence": stmt.excluded.confidence, "generated_at": datetime.utcnow()}
+        )
+        db.execute(stmt);
+        db.commit()
+        return jsonify({"status": "success", "count": len(rows)})
+    except Exception as e:
+        db.rollback();
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/transfers/recommend/<int:company_id>", methods=["GET"])
+def get_transfer_recommendations(company_id):
+    limit = int(request.args.get("limit", 500))
+    db = SessionLocal()
+    try:
+        rows = (db.query(TransferRecommendation)
+                .filter_by(company_id=company_id)
+                .order_by(TransferRecommendation.confidence.desc())
+                .limit(limit).all())
+        return jsonify([{
+            "product_id": r.product_id,
+            "from_warehouse_id": r.from_warehouse_id,
+            "to_warehouse_id": r.to_warehouse_id,
+            "suggested_qty": float(r.suggested_qty),
+            "from_on_hand": float(r.from_on_hand),
+            "to_on_hand": float(r.to_on_hand),
+            "from_days_cover": float(r.from_days_cover) if r.from_days_cover is not None else None,
+            "to_days_cover": float(r.to_days_cover) if r.to_days_cover is not None else None,
+            "confidence": float(r.confidence),
+            "rationale": r.rationale,
+            "generated_at": r.generated_at.isoformat()
+        } for r in rows])
+    finally:
+        db.close()
+
+
+# -------------------- 14) Stockout Risk --------------------
+@app.route("/api/v1/inventory/stockout-risk/train", methods=["POST"])
+def train_stockout_risk():
+    data = request.get_json() or {}
+    company_id = data.get("company_id")
+    warehouse_id = data.get("warehouse_id")
+    horizon_days = int(data.get("horizon_days", 14))
+    lookback_days = int(data.get("lookback_days", 60))
+    if not (company_id and warehouse_id):
+        return jsonify({"status": "error", "message": "company_id & warehouse_id required"}), 400
+
+    rows = compute_stockout_risk(int(company_id), int(warehouse_id), horizon_days, lookback_days)
+    if not rows:
+        return jsonify({"status": "ok", "count": 0, "message": "No data"}), 200
+
+    db = SessionLocal()
+    try:
+        stmt = insert(StockoutRisk).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_stockout_company_wh_prod_horizon_model",
+            set_={"lookback_days": stmt.excluded.lookback_days, "on_hand": stmt.excluded.on_hand,
+                  "avg_daily_demand": stmt.excluded.avg_daily_demand,
+                  "std_daily_demand": stmt.excluded.std_daily_demand,
+                  "expected_demand": stmt.excluded.expected_demand,
+                  "stockout_probability": stmt.excluded.stockout_probability,
+                  "expected_stockout_date": stmt.excluded.expected_stockout_date,
+                  "recommended_qty": stmt.excluded.recommended_qty,
+                  "risk_level": stmt.excluded.risk_level, "generated_at": datetime.utcnow()}
+        )
+        db.execute(stmt);
+        db.commit()
+        return jsonify({"status": "success", "count": len(rows)})
+    except Exception as e:
+        db.rollback();
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/inventory/stockout-risk/<int:company_id>/<int:warehouse_id>", methods=["GET"])
+def get_stockout_risk(company_id, warehouse_id):
+    horizon_days = int(request.args.get("horizon_days", 14))
+    limit = int(request.args.get("limit", 500))
+    db = SessionLocal()
+    try:
+        rows = (db.query(StockoutRisk)
+                .filter_by(company_id=company_id, warehouse_id=warehouse_id, horizon_days=horizon_days)
+                .order_by(StockoutRisk.stockout_probability.desc())
+                .limit(limit).all())
+        return jsonify([{
+            "product_id": r.product_id,
+            "on_hand": float(r.on_hand),
+            "avg_daily_demand": float(r.avg_daily_demand),
+            "expected_demand": float(r.expected_demand),
+            "stockout_probability": float(r.stockout_probability),
+            "expected_stockout_date": r.expected_stockout_date.isoformat() if r.expected_stockout_date else None,
+            "recommended_qty": float(r.recommended_qty),
+            "risk_level": r.risk_level,
+            "generated_at": r.generated_at.isoformat()
+        } for r in rows])
+    finally:
+        db.close()
+
+
+# -------------------- 15) Slow Movers --------------------
+@app.route("/api/v1/inventory/slow-movers/train", methods=["POST"])
+def train_slow_movers():
+    data = request.get_json() or {}
+    company_id = data.get("company_id")
+    warehouse_id = data.get("warehouse_id")
+    lookback_days = int(data.get("lookback_days", 120))
+    min_on_hand = float(data.get("min_on_hand", 1))
+    if not (company_id and warehouse_id):
+        return jsonify({"status": "error", "message": "company_id & warehouse_id required"}), 400
+
+    rows = compute_slow_movers(int(company_id), int(warehouse_id), lookback_days, min_on_hand)
+    if not rows:
+        return jsonify({"status": "ok", "count": 0, "message": "No slow movers"}), 200
+
+    db = SessionLocal()
+    try:
+        stmt = insert(SlowMoverRisk).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_slow_mover_company_wh_prod_model",
+            set_={"lookback_days": stmt.excluded.lookback_days, "on_hand": stmt.excluded.on_hand,
+                  "avg_daily_sales": stmt.excluded.avg_daily_sales,
+                  "days_since_last_sale": stmt.excluded.days_since_last_sale,
+                  "days_cover": stmt.excluded.days_cover, "slow_mover_score": stmt.excluded.slow_mover_score,
+                  "risk_level": stmt.excluded.risk_level, "recommended_action": stmt.excluded.recommended_action,
+                  "rationale": stmt.excluded.rationale, "generated_at": datetime.utcnow()}
+        )
+        db.execute(stmt);
+        db.commit()
+        return jsonify({"status": "success", "count": len(rows)})
+    except Exception as e:
+        db.rollback();
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/inventory/slow-movers/<int:company_id>/<int:warehouse_id>", methods=["GET"])
+def get_slow_movers(company_id, warehouse_id):
+    limit = int(request.args.get("limit", 500))
+    db = SessionLocal()
+    try:
+        rows = (db.query(SlowMoverRisk)
+                .filter_by(company_id=company_id, warehouse_id=warehouse_id)
+                .order_by(SlowMoverRisk.slow_mover_score.desc())
+                .limit(limit).all())
+        return jsonify([{
+            "product_id": r.product_id,
+            "on_hand": float(r.on_hand),
+            "avg_daily_sales": float(r.avg_daily_sales),
+            "days_since_last_sale": int(r.days_since_last_sale),
+            "days_cover": float(r.days_cover),
+            "slow_mover_score": float(r.slow_mover_score),
+            "risk_level": r.risk_level,
+            "recommended_action": r.recommended_action,
+            "rationale": r.rationale,
+            "generated_at": r.generated_at.isoformat()
+        } for r in rows])
+    finally:
+        db.close()
+
+
+# -------------------- 16) Return Pressure --------------------
+@app.route("/api/v1/returns/pressure/train", methods=["POST"])
+def train_return_pressure():
+    data = request.get_json() or {}
+    company_id = data.get("company_id")
+    warehouse_id = data.get("warehouse_id")
+    period_days = int(data.get("period_days", 60))
+    if not (company_id and warehouse_id):
+        return jsonify({"status": "error", "message": "company_id & warehouse_id required"}), 400
+
+    rows = compute_return_pressure(int(company_id), int(warehouse_id), period_days)
+    if not rows:
+        return jsonify({"status": "ok", "count": 0, "message": "No data"}), 200
+
+    db = SessionLocal()
+    try:
+        stmt = insert(ReturnPressureIndex).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_return_pressure_company_wh_prod_period_model",
+            set_={"sale_out_qty": stmt.excluded.sale_out_qty, "return_in_qty": stmt.excluded.return_in_qty,
+                  "return_rate": stmt.excluded.return_rate, "score": stmt.excluded.score,
+                  "level": stmt.excluded.level, "trend": stmt.excluded.trend,
+                  "generated_at": datetime.utcnow()}
+        )
+        db.execute(stmt);
+        db.commit()
+        return jsonify({"status": "success", "count": len(rows)})
+    except Exception as e:
+        db.rollback();
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/returns/pressure/<int:company_id>/<int:warehouse_id>", methods=["GET"])
+def get_return_pressure(company_id, warehouse_id):
+    period_days = int(request.args.get("period_days", 60))
+    limit = int(request.args.get("limit", 500))
+    db = SessionLocal()
+    try:
+        rows = (db.query(ReturnPressureIndex)
+                .filter_by(company_id=company_id, warehouse_id=warehouse_id, period_days=period_days)
+                .order_by(ReturnPressureIndex.score.desc())
+                .limit(limit).all())
+        return jsonify([{
+            "product_id": r.product_id,
+            "sale_out_qty": float(r.sale_out_qty),
+            "return_in_qty": float(r.return_in_qty),
+            "return_rate": float(r.return_rate),
+            "score": float(r.score),
+            "level": r.level,
+            "trend": r.trend,
+            "generated_at": r.generated_at.isoformat()
+        } for r in rows])
+    finally:
+        db.close()
+
+
+# -------------------- 17) Receipt Cost Alerts --------------------
+@app.route("/api/v1/cost/receipt-alerts/train", methods=["POST"])
+def train_receipt_cost_alerts():
+    data = request.get_json() or {}
+    company_id = data.get("company_id")
+    warehouse_id = data.get("warehouse_id")
+    lookback_days = int(data.get("lookback_days", 180))
+    short_window_days = int(data.get("short_window_days", 7))
+    long_window_days = int(data.get("long_window_days", 30))
+    if not (company_id and warehouse_id):
+        return jsonify({"status": "error", "message": "company_id & warehouse_id required"}), 400
+
+    rows = compute_receipt_cost_alerts(int(company_id), int(warehouse_id), lookback_days, short_window_days,
+                                       long_window_days)
+    if not rows:
+        return jsonify({"status": "ok", "count": 0, "message": "No alerts"}), 200
+
+    db = SessionLocal()
+    try:
+        stmt = insert(ReceiptCostAlert).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_receipt_cost_company_wh_prod_model",
+            set_={"avg_cost_short": stmt.excluded.avg_cost_short, "avg_cost_long": stmt.excluded.avg_cost_long,
+                  "cost_change_pct": stmt.excluded.cost_change_pct,
+                  "volatility_lookback": stmt.excluded.volatility_lookback,
+                  "level": stmt.excluded.level, "message": stmt.excluded.message,
+                  "generated_at": datetime.utcnow()}
+        )
+        db.execute(stmt);
+        db.commit()
+        return jsonify({"status": "success", "count": len(rows)})
+    except Exception as e:
+        db.rollback();
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/cost/receipt-alerts/<int:company_id>/<int:warehouse_id>", methods=["GET"])
+def get_receipt_cost_alerts(company_id, warehouse_id):
+    limit = int(request.args.get("limit", 500))
+    db = SessionLocal()
+    try:
+        rows = (db.query(ReceiptCostAlert)
+                .filter_by(company_id=company_id, warehouse_id=warehouse_id)
+                .order_by(ReceiptCostAlert.generated_at.desc())
+                .limit(limit).all())
+        return jsonify([{
+            "product_id": r.product_id,
+            "avg_cost_short": float(r.avg_cost_short),
+            "avg_cost_long": float(r.avg_cost_long),
+            "cost_change_pct": float(r.cost_change_pct),
+            "volatility_lookback": float(r.volatility_lookback),
+            "level": r.level,
+            "message": r.message,
+            "generated_at": r.generated_at.isoformat()
+        } for r in rows])
+    finally:
+        db.close()
+
+
+# -------------------- 18) Forecast Metrics & Drift --------------------
+@app.route("/api/v1/models/forecast-metrics/train", methods=["POST"])
+def train_forecast_metrics():
+    data = request.get_json() or {}
+    company_id = data.get("company_id")
+    warehouse_id = data.get("warehouse_id")
+    lookback_days = int(data.get("lookback_days", 180))
+    if not (company_id and warehouse_id):
+        return jsonify({"status": "error", "message": "company_id & warehouse_id required"}), 400
+
+    rows = compute_forecast_metrics(int(company_id), int(warehouse_id), lookback_days)
+    if not rows:
+        return jsonify({"status": "ok", "count": 0, "message": "No comparable data"}), 200
+
+    db = SessionLocal()
+    try:
+        stmt = insert(ForecastModelMetric).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_forecast_metrics_company_wh_prod_model",
+            set_={"lookback_days": stmt.excluded.lookback_days, "mae": stmt.excluded.mae, "mape": stmt.excluded.mape,
+                  "bias": stmt.excluded.bias, "drift_score": stmt.excluded.drift_score,
+                  "drift_level": stmt.excluded.drift_level,
+                  "notes": stmt.excluded.notes, "generated_at": datetime.utcnow()}
+        )
+        db.execute(stmt);
+        db.commit()
+        return jsonify({"status": "success", "count": len(rows)})
+    except Exception as e:
+        db.rollback();
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/models/forecast-metrics/<int:company_id>/<int:warehouse_id>", methods=["GET"])
+def get_forecast_metrics(company_id, warehouse_id):
+    limit = int(request.args.get("limit", 500))
+    db = SessionLocal()
+    try:
+        rows = (db.query(ForecastModelMetric)
+                .filter_by(company_id=company_id, warehouse_id=warehouse_id)
+                .order_by(ForecastModelMetric.drift_score.desc())
+                .limit(limit).all())
+        return jsonify([{
+            "product_id": r.product_id,
+            "mae": float(r.mae),
+            "mape": float(r.mape),
+            "bias": float(r.bias),
+            "drift_score": float(r.drift_score),
+            "drift_level": r.drift_level,
+            "notes": r.notes,
+            "generated_at": r.generated_at.isoformat()
+        } for r in rows])
     finally:
         db.close()
 
